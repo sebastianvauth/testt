@@ -74,6 +74,10 @@
         button#clear-button:hover {
             background-color: #c0392b;
         }
+        button#clear-button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
 
         #prediction-output {
             font-size: 3.5em;
@@ -88,6 +92,7 @@
             color: #7f8c8d;
             height: 20px; /* Reserve space */
             margin-bottom: 15px;
+            text-align: center;
         }
 
         #confidence-bars {
@@ -126,6 +131,8 @@
             line-height: 15px; /* Center text vertically */
             padding-right: 3px;
             box-sizing: border-box; /* Include padding in width */
+            white-space: nowrap; /* Prevent text wrapping */
+            overflow: hidden; /* Hide text if bar is too small */
         }
         .confidence-bar.highlight {
              background-color: #2ecc71; /* Highlight predicted digit */
@@ -134,7 +141,7 @@
 </head>
 <body>
     <h1>Interactive Digit Recognizer</h1>
-    <div id="status">Loading Model... Please Wait.</div>
+    <div id="status">Loading Libraries...</div>
 
     <div class="container">
         <!-- Input Card -->
@@ -162,11 +169,11 @@
 
     <script>
         let inputCanvas;
-        let nnCanvas;
+        let nnCanvas; // This will be a p5 Graphics object
         let model;
         let prediction = "?";
         let confidences = [];
-        let nnVizData = { layers: [], activations: [] }; // Structure to hold viz info
+        let nnVizData = { layers: [], activations: [], predictedDigit: null };
         let isDrawing = false;
         let graphicsBuffer; // Off-screen buffer for drawing (28x28)
 
@@ -181,6 +188,7 @@
         // --- p5.js Sketch ---
 
         function setup() {
+             select('#status').html('Initializing Canvas...');
             // --- Input Canvas ---
             let inputContainer = select('#input-canvas-container');
             inputCanvas = createCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -192,9 +200,11 @@
             graphicsBuffer.pixelDensity(1); // Ensure correct pixel density
 
             // --- Visualization Canvas ---
+            // We use createGraphics so we can draw to it independently
+            // and then attach its canvas element to the DOM.
             let nnContainer = select('#nn-visualization-container');
-            nnCanvas = createGraphics(NN_VIS_WIDTH, NN_VIS_HEIGHT); // Use createGraphics for separate rendering
-            nnCanvas.parent(nnContainer); // Attach to its container
+            nnCanvas = createGraphics(NN_VIS_WIDTH, NN_VIS_HEIGHT);
+            nnCanvas.parent(nnContainer); // Attach its underlying canvas element
             nnCanvas.style('display', 'block');
 
             // --- Initialize State & UI ---
@@ -211,10 +221,10 @@
         }
 
         function draw() {
-            // --- Handle Drawing Input ---
-            if (mouseIsPressed && mouseIsOverCanvas(inputCanvas)) {
+            // --- Handle Drawing Input on the main canvas ---
+            if (mouseIsPressed && isMouseOverInputCanvas()) {
                 isDrawing = true;
-                // Draw thick white line on main input canvas (scaled)
+                // Draw thick black line on main input canvas (scaled)
                 stroke(0); // Black ink
                 strokeWeight(DRAW_SCALE * 1.5); // Adjust thickness relative to scale
                 line(pmouseX, pmouseY, mouseX, mouseY);
@@ -227,29 +237,38 @@
                     mouseX / DRAW_SCALE, mouseY / DRAW_SCALE
                 );
             }
-
-            // --- Visualization Update ---
-            // The NN visualization is mostly static structure, updated only on prediction
-            // We could add idle animations here if desired.
         }
 
         function mouseReleased() {
-            if (isDrawing && mouseIsOverCanvas(inputCanvas)) {
-                isDrawing = false;
+            // Only predict if drawing occurred over the input canvas
+            if (isDrawing && isMouseOverInputCanvas(true)) {
+                 isDrawing = false; // Reset drawing flag AFTER check
                 if (model) { // Only predict if model is loaded
                    predictDigit();
                 } else {
                     console.warn("Model not loaded yet.");
+                    select('#status').html('Model not loaded yet.');
                 }
+            } else {
+                // If mouse released elsewhere or wasn't drawing, ensure flag is false
+                isDrawing = false;
             }
         }
 
-        // Helper to check if mouse is over a specific canvas
-        function mouseIsOverCanvas(canvasInstance) {
-            const canvasX = canvasInstance.elt.offsetLeft;
-            const canvasY = canvasInstance.elt.offsetTop;
-            return mouseX > canvasX && mouseX < canvasX + canvasInstance.width &&
-                   mouseY > canvasY && mouseY < canvasY + canvasInstance.height;
+        // Helper to check if mouse is over the *input* canvas
+        // pass checkRelease=true if called from mouseReleased to be less strict about boundaries
+        function isMouseOverInputCanvas(checkRelease = false) {
+            // Get position relative to the page, not just the p5 canvas
+            const canvasRect = inputCanvas.elt.getBoundingClientRect();
+            const mouseCheckX = checkRelease ? mouseX : pmouseX; // Use previous mouse pos unless releasing
+            const mouseCheckY = checkRelease ? mouseY : pmouseY;
+
+             // Check if the relevant mouse position is within the input canvas bounds
+            return (
+                mouseCheckX >= canvasRect.left && mouseCheckX <= canvasRect.right &&
+                mouseCheckY >= canvasRect.top && mouseCheckY <= canvasRect.bottom
+            );
+
         }
 
         function clearDrawing() {
@@ -262,20 +281,19 @@
             resetNetworkVisualization();
             drawNeuralNetworkVisualization(); // Redraw static structure
             isDrawing = false; // Reset drawing state
+             if (model) select('#status').html('Model Loaded. Ready to draw!');
         }
 
         // --- TensorFlow.js Model Handling ---
 
         async function loadTFModel() {
             const statusDiv = select('#status');
+            statusDiv.html('Loading Model... Please Wait.'); // Update status
             try {
                 console.log("Loading model...");
-                statusDiv.html('Loading Model... Please Wait.');
-                // Load a publicly hosted MNIST CNN model (TF.js Layers format)
-                 // This model expects input shape [null, 28, 28, 1] and values between 0-1.
-                model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mnist_cnn_v1/model.json');
-
-                // model = await tf.loadLayersModel('localfolder/model.json'); // Use this if hosting locally with a server
+                 // --- THIS IS THE CORRECTED/UPDATED URL ---
+                model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-examples/mnist-layers/model.json');
+                // --- END OF CORRECTION ---
 
                 console.log("Model loaded successfully.");
                 statusDiv.html('Model Loaded. Ready to draw!');
@@ -292,6 +310,7 @@
         async function predictDigit() {
             if (!model) {
                 console.log("Model not available.");
+                 select('#status').html('Model not loaded!');
                 return;
             }
 
@@ -299,89 +318,106 @@
             statusDiv.html('Predicting...');
             select('#prediction-output').html('...'); // Indicate processing
 
-            await tf.tidy(() => { // Use tf.tidy to automatically manage tensor memory
+            // Use a short delay to allow UI to update before potential blocking TF code
+            await new Promise(resolve => setTimeout(resolve, 10));
 
-                // 1. Get image data from the small graphics buffer
-                let img = graphicsBuffer.get(); // Get p5 image object
+            try {
+                await tf.tidy(() => { // Use tf.tidy to automatically manage tensor memory
 
-                // 2. Convert to TensorFlow tensor
-                // fromPixels takes HTML Image/Canvas element or ImageData
-                // We need to get the canvas element from the graphics buffer
-                 let tensor = tf.browser.fromPixels(graphicsBuffer.elt, 1) // 1 channel (grayscale)
-                    .resizeBilinear([INPUT_SIZE, INPUT_SIZE]) // Ensure correct size
-                    .toFloat() // Convert to float
-                    .div(tf.scalar(255)) // Normalize 0-255 -> 0-1
-                    .expandDims(0); // Add batch dimension: [1, 28, 28, 1]
+                    // 1. Get image data from the small graphics buffer
+                    // Need the underlying canvas element for fromPixels
+                    const graphicsCanvas = graphicsBuffer.elt;
 
-                // console.log("Input Tensor Shape:", tensor.shape); // Should be [1, 28, 28, 1]
+                    // 2. Convert to TensorFlow tensor
+                    let tensor = tf.browser.fromPixels(graphicsCanvas, 1) // 1 channel (grayscale)
+                        // .resizeBilinear([INPUT_SIZE, INPUT_SIZE]) // Resize might not be needed if buffer is exact, but good practice
+                        .toFloat() // Convert to float
+                        .div(tf.scalar(255)) // Normalize 0-255 -> 0-1
+                        .expandDims(0); // Add batch dimension: [1, 28, 28, 1]
 
-                // 3. Make prediction
-                let outputTensor = model.predict(tensor);
+                    // console.log("Input Tensor Shape:", tensor.shape); // Should be [1, 28, 28, 1]
 
-                // 4. Process output tensor
-                confidences = outputTensor.dataSync(); // Use dataSync for simplicity here
-                let maxConfidence = 0;
-                let predictedDigit = 0;
+                    // 3. Make prediction
+                    let outputTensor = model.predict(tensor);
 
-                confidences.forEach((confidence, digit) => {
-                    if (confidence > maxConfidence) {
-                        maxConfidence = confidence;
-                        predictedDigit = digit;
-                    }
-                });
+                    // 4. Process output tensor
+                    // Use await data() for async version, preferred over dataSync
+                    // confidences = await outputTensor.data(); // returns TypedArray
+                    confidences = Array.from(outputTensor.dataSync()); // Use sync and convert for simplicity here
 
-                prediction = `${predictedDigit}`;
+                    let maxConfidence = 0;
+                    let predictedDigit = 0;
 
-                // 5. Update UI
-                select('#prediction-output').html(prediction);
-                updateConfidenceBars(confidences, predictedDigit);
-                updateNetworkVisualization(confidences, predictedDigit); // Update NN viz based on prediction
-                drawNeuralNetworkVisualization(); // Redraw the NN with highlights
+                    confidences.forEach((confidence, digit) => {
+                        if (confidence > maxConfidence) {
+                            maxConfidence = confidence;
+                            predictedDigit = digit;
+                        }
+                    });
 
-            }); // End of tf.tidy block
+                    prediction = `${predictedDigit}`;
 
-             statusDiv.html('Prediction Complete.');
+                    // 5. Update UI
+                    select('#prediction-output').html(prediction);
+                    updateConfidenceBars(confidences, predictedDigit);
+                    updateNetworkVisualization(confidences, predictedDigit); // Update NN viz based on prediction
+                    drawNeuralNetworkVisualization(); // Redraw the NN with highlights
+
+                }); // End of tf.tidy block
+
+                 statusDiv.html('Prediction Complete.');
+
+            } catch(error) {
+                 console.error("Error during prediction:", error);
+                 statusDiv.html('Error during prediction.');
+                 select('#prediction-output').html('Error');
+            }
         }
 
 
         // --- Visualization Functions ---
 
         function initializeNetworkVisualization(loadedModel = null) {
-            // Basic static representation
-            // Could potentially inspect loadedModel.layers here for more accuracy
+            // Basic static representation based on the known model structure or default
+             let layersInfo = [
+                { count: 784, label: 'Input (28x28)', type: 'input' }, // Represent input pixels
+                { count: 16, label: 'Conv2D', type: 'hidden' },       // Typical layers in TF.js MNIST examples
+                { count: 32, label: 'Conv2D', type: 'hidden' },
+                { count: 64, label: 'Dense', type: 'hidden' },
+                { count: 10, label: 'Output', type: 'output' }        // Output layer (digits 0-9)
+             ];
+             // Could try to inspect model layers:
+             // if (loadedModel && loadedModel.layers) { ... parse layers ... }
+
             nnVizData = {
-                layers: [
-                    { count: 10, label: 'Input (28x28)', type: 'input' }, // Simplified input representation
-                    { count: 8, label: 'Conv/Pool 1', type: 'hidden' },
-                    { count: 16, label: 'Conv/Pool 2', type: 'hidden' },
-                    { count: 32, label: 'Dense', type: 'hidden' },
-                    { count: 10, label: 'Output', type: 'output' } // Output layer (digits 0-9)
-                ],
-                activations: [], // Will store output layer activations
+                layers: layersInfo,
+                activations: Array(layersInfo[layersInfo.length - 1].count).fill(0), // Activations for output layer
                 predictedDigit: null
             };
-            nnVizData.activations = Array(nnVizData.layers[nnVizData.layers.length - 1].count).fill(0);
         }
 
         function resetNetworkVisualization() {
-             nnVizData.activations.fill(0);
+             if (nnVizData.activations) nnVizData.activations.fill(0);
              nnVizData.predictedDigit = null;
         }
 
         function updateNetworkVisualization(outputConfidences, predictedDigit) {
             // Update activations for the output layer based on prediction
-            nnVizData.activations = Array.from(outputConfidences); // Convert TypedArray to regular array
+            nnVizData.activations = outputConfidences; // Assuming outputConfidences is a plain array now
             nnVizData.predictedDigit = predictedDigit;
         }
 
+        // Draws the NN structure and highlights onto the nnCanvas graphics object
         function drawNeuralNetworkVisualization() {
-            const nn = nnCanvas; // Use the graphics buffer
-            nn.background(250); // Light background for the viz canvas
+            const nn = nnCanvas; // Target the p5 Graphics object
+            nn.push(); // Isolate drawing styles
+
+            nn.background(248, 250, 252); // Light background for the viz canvas
             nn.textAlign(nn.CENTER, nn.CENTER);
             nn.textSize(10);
 
             const layerSpacing = nn.width / (nnVizData.layers.length + 1);
-            const maxNodesToShow = 12; // Limit nodes per layer for clarity
+            const maxNodesToShow = 10; // Limit nodes per layer for clarity
 
             for (let i = 0; i < nnVizData.layers.length; i++) {
                 const layer = nnVizData.layers[i];
@@ -393,46 +429,43 @@
                 nn.text(layer.label, x, 15);
 
                 const nodeCount = Math.min(layer.count, maxNodesToShow);
-                const nodeSpacing = (nn.height - 60) / Math.max(1, nodeCount -1); // Vertical spacing
-                 const startY = nodeCount === 1 ? nn.height / 2 : 40;
+                const nodeSpacing = (nn.height - 60) / Math.max(1, nodeCount); // Vertical spacing (use nodeCount directly)
+                const startY = 40 + nodeSpacing / 2; // Start position adjusted for spacing
 
-                 // Draw connections (simplified)
+                // Draw connections (simplified lines between layer centers)
                 if (i > 0) {
-                    const prevLayer = nnVizData.layers[i-1];
                     const prevX = layerSpacing * i;
-                    const prevNodeCount = Math.min(prevLayer.count, maxNodesToShow);
-                     const prevStartY = prevNodeCount === 1 ? nn.height / 2 : 40;
-                     const prevNodeSpacing = (nn.height - 60) / Math.max(1, prevNodeCount -1);
-
                     nn.stroke(200, 200, 200, 100); // Light grey connections
-                    nn.strokeWeight(0.5);
-                     for (let j = 0; j < nodeCount; j++) {
-                         const y = nodeCount === 1 ? startY : startY + j * nodeSpacing;
-                         for (let k = 0; k < prevNodeCount; k++) {
-                             const prevY = prevNodeCount === 1 ? prevStartY : prevStartY + k * prevNodeSpacing;
-                             nn.line(prevX, prevY, x, y);
-                         }
+                    nn.strokeWeight(1);
+                    // Draw a few representative lines
+                    const numConnections = Math.min(nodeCount, 5); // Draw fewer connections for clarity
+                     for (let j = 0; j < numConnections; j++) {
+                         const y = startY + j * nodeSpacing * (nodeCount/numConnections); // Spread out connections
+                         const prevNodeCount = Math.min(nnVizData.layers[i-1].count, maxNodesToShow);
+                         const prevNodeSpacing = (nn.height - 60) / Math.max(1, prevNodeCount);
+                         const prevStartY = 40 + prevNodeSpacing / 2;
+                         const prevY = prevStartY + (j % prevNodeCount) * prevNodeSpacing; // Connect to different previous nodes
+                         nn.line(prevX, prevY, x, y);
                      }
                 }
 
-
                 // Draw Nodes
                 for (let j = 0; j < nodeCount; j++) {
-                    const y = nodeCount === 1 ? startY : startY + j * nodeSpacing;
+                    const y = startY + j * nodeSpacing;
                     let nodeSize = (layer.type === 'output' || layer.type === 'input') ? 10 : 7;
-                    let nodeColor = color(200); // Default grey
-                    let nodeStroke = 180;
+                    let nodeColor = nn.color(200); // Default grey
+                    let nodeStroke = nn.color(180);
                     let nodeStrokeWeight = 1;
 
                     if (layer.type === 'output') {
-                        const activation = nnVizData.activations[j] || 0;
+                        const activation = (nnVizData.activations && nnVizData.activations[j]) ? nnVizData.activations[j] : 0;
                         // Color based on activation strength (blue intensity)
-                        nodeColor = lerpColor(color(230), color(52, 152, 219, 255), activation);
+                        nodeColor = nn.lerpColor(nn.color(230), nn.color(52, 152, 219, 255), activation);
                         nodeSize = 8 + activation * 8; // Size based on activation
 
                         if (j === nnVizData.predictedDigit) {
-                            nodeColor = color(46, 204, 113); // Highlight predicted green
-                            nodeStroke = color(39, 174, 96);
+                            nodeColor = nn.color(46, 204, 113); // Highlight predicted green
+                            nodeStroke = nn.color(39, 174, 96);
                             nodeStrokeWeight = 2;
                             nodeSize = 18; // Make predicted larger
                         }
@@ -445,9 +478,9 @@
                          nn.text(j, x + nodeSize / 2 + 5, y);
                          nn.textAlign(nn.CENTER, nn.CENTER); // Reset alignment
                     } else if (layer.type === 'input') {
-                         nodeColor = color(210);
+                         nodeColor = nn.color(210);
+                         nodeSize = 3; // Input nodes smaller
                     }
-
 
                     nn.fill(nodeColor);
                     nn.stroke(nodeStroke);
@@ -460,14 +493,7 @@
                      nn.text("...", x, nn.height - 15);
                  }
             }
-             // Draw the visualization from the graphics buffer onto the main canvas
-            image(nnCanvas, 0, 0); // This line might be causing issues if called inside draw() when nnCanvas is the main canvas.
-                                     // Since nnCanvas is a separate graphics object, we need to explicitly draw it
-                                     // onto the *actual* p5 canvas IF we weren't attaching it via .parent().
-                                     // But since we used .parent(), p5 handles displaying it. We just draw *to* nnCanvas.
-                                     // The 'image(nnCanvas, 0, 0)' line is only needed if nnCanvas was NOT attached
-                                     // to the DOM and you wanted to draw its contents onto the *main* p5 canvas.
-                                     // We can safely remove it here as nnCanvas is parented.
+            nn.pop(); // Restore drawing styles
         }
 
 
@@ -476,13 +502,12 @@
             barsContainer.html(''); // Clear previous bars
 
             if (!confidences || confidences.length === 0) {
-                 // Optionally show placeholder text
                  barsContainer.html('<p style="font-size: 0.9em; color: #888;">Draw a digit to see confidences.</p>');
                 return;
             }
 
             for (let i = 0; i < confidences.length; i++) {
-                let confidence = confidences[i];
+                let confidence = confidences[i] || 0; // Ensure confidence is not undefined/null
                 let percentage = (confidence * 100);
 
                 // Create entry container
@@ -501,10 +526,12 @@
                 barBg.addClass('confidence-bar-bg');
 
                 // Create Inner Bar
-                let bar = createDiv(percentage.toFixed(1) + '%'); // Show percentage inside bar
+                let bar = createDiv(percentage.toFixed(1) + '%');
                 bar.parent(barBg);
                 bar.addClass('confidence-bar');
-                bar.style('width', `${percentage}%`); // Set width based on confidence
+                // Use setTimeout to apply width after element is added to DOM for transition
+                setTimeout(() => { bar.style('width', `${Math.max(0, Math.min(100, percentage))}%`); }, 10);
+
 
                 if (i === predictedDigit) {
                     bar.addClass('highlight'); // Add highlight class if it's the prediction
