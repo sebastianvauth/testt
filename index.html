@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Digit Recognizer Demo</title>
+    <!-- Load p5.js and TensorFlow.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.1/p5.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f7f9;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .container {
+            display: flex;
+            gap: 25px;
+            justify-content: center;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            width: 100%;
+            max-width: 1200px; /* Limit overall width */
+        }
+        .card {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 300px; /* Ensure cards don't get too small */
+        }
+        .card h2 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            color: #34495e;
+            font-size: 1.2em;
+            text-align: center;
+        }
+        /* Canvas styling */
+        #input-canvas-container canvas,
+        #nn-visualization-container canvas {
+            border: 2px solid #e1e8ed;
+            border-radius: 4px;
+            margin-top: 10px; /* Spacing */
+        }
+        #input-canvas-container canvas {
+             cursor: crosshair;
+        }
+
+        button#clear-button {
+            margin-top: 15px;
+            padding: 10px 20px;
+            font-size: 1em;
+            cursor: pointer;
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.2s ease;
+        }
+        button#clear-button:hover {
+            background-color: #c0392b;
+        }
+
+        #prediction-output {
+            font-size: 3.5em;
+            font-weight: bold;
+            color: #2980b9;
+            margin: 10px 0;
+            min-height: 60px; /* Prevent layout shift */
+            line-height: 1;
+        }
+         #status {
+            font-style: italic;
+            color: #7f8c8d;
+            height: 20px; /* Reserve space */
+            margin-bottom: 15px;
+        }
+
+        #confidence-bars {
+            width: 100%;
+            max-width: 250px; /* Limit width of bars section */
+            margin-top: 10px;
+        }
+        .confidence-entry {
+            display: flex;
+            align-items: center;
+            margin-bottom: 4px;
+            font-size: 0.9em;
+        }
+        .confidence-label {
+             width: 65px; /* Label width (e.g., "Digit 5:") */
+             flex-shrink: 0;
+             color: #555;
+        }
+        .confidence-bar-bg {
+            flex-grow: 1;
+            height: 15px;
+            background-color: #ecf0f1;
+            border-radius: 3px;
+            overflow: hidden; /* Clip the inner bar */
+            margin-left: 5px;
+        }
+        .confidence-bar {
+            height: 100%;
+            background-color: #3498db;
+            width: 0%; /* Start at 0% */
+            border-radius: 3px;
+            transition: width 0.3s ease-out;
+            text-align: right;
+            color: white;
+            font-size: 0.8em;
+            line-height: 15px; /* Center text vertically */
+            padding-right: 3px;
+            box-sizing: border-box; /* Include padding in width */
+        }
+        .confidence-bar.highlight {
+             background-color: #2ecc71; /* Highlight predicted digit */
+        }
+    </style>
+</head>
+<body>
+    <h1>Interactive Digit Recognizer</h1>
+    <div id="status">Loading Model... Please Wait.</div>
+
+    <div class="container">
+        <!-- Input Card -->
+        <div class="card" id="input-canvas-container">
+            <h2>Draw a Digit (0-9)</h2>
+            <!-- p5.js will create canvas here -->
+            <button id="clear-button" disabled>Clear</button>
+        </div>
+
+        <!-- Visualization Card -->
+        <div class="card" id="nn-visualization-container">
+            <h2>Network Prediction (Simplified)</h2>
+            <!-- p5.js will create visualization canvas here -->
+        </div>
+
+        <!-- Output Card -->
+        <div class="card" id="output-container">
+            <h2>Prediction</h2>
+            <div id="prediction-output">?</div>
+            <div id="confidence-bars">
+                 <!-- Confidence bars will be added here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let inputCanvas;
+        let nnCanvas;
+        let model;
+        let prediction = "?";
+        let confidences = [];
+        let nnVizData = { layers: [], activations: [] }; // Structure to hold viz info
+        let isDrawing = false;
+        let graphicsBuffer; // Off-screen buffer for drawing (28x28)
+
+        const INPUT_SIZE = 28;
+        const DRAW_SCALE = 10; // Draw on a larger canvas (280x280)
+        const CANVAS_WIDTH = INPUT_SIZE * DRAW_SCALE;
+        const CANVAS_HEIGHT = INPUT_SIZE * DRAW_SCALE;
+
+        const NN_VIS_WIDTH = 300;
+        const NN_VIS_HEIGHT = 250;
+
+        // --- p5.js Sketch ---
+
+        function setup() {
+            // --- Input Canvas ---
+            let inputContainer = select('#input-canvas-container');
+            inputCanvas = createCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+            inputCanvas.parent(inputContainer); // Attach to the container div
+            inputCanvas.style('display', 'block'); // Prevent extra space below canvas
+
+            // Create a smaller off-screen buffer for the actual 28x28 input
+            graphicsBuffer = createGraphics(INPUT_SIZE, INPUT_SIZE);
+            graphicsBuffer.pixelDensity(1); // Ensure correct pixel density
+
+            // --- Visualization Canvas ---
+            let nnContainer = select('#nn-visualization-container');
+            nnCanvas = createGraphics(NN_VIS_WIDTH, NN_VIS_HEIGHT); // Use createGraphics for separate rendering
+            nnCanvas.parent(nnContainer); // Attach to its container
+            nnCanvas.style('display', 'block');
+
+            // --- Initialize State & UI ---
+            clearDrawing(); // Set initial background and clear buffer
+            initializeNetworkVisualization(); // Set up basic viz structure
+            drawNeuralNetworkVisualization(); // Initial draw of the NN structure
+            updateConfidenceBars([]); // Initial empty bars
+
+            // --- Button Listener ---
+            select('#clear-button').mousePressed(clearDrawing);
+
+            // --- Load Model ---
+            loadTFModel(); // Start loading the model asynchronously
+        }
+
+        function draw() {
+            // --- Handle Drawing Input ---
+            if (mouseIsPressed && mouseIsOverCanvas(inputCanvas)) {
+                isDrawing = true;
+                // Draw thick white line on main input canvas (scaled)
+                stroke(0); // Black ink
+                strokeWeight(DRAW_SCALE * 1.5); // Adjust thickness relative to scale
+                line(pmouseX, pmouseY, mouseX, mouseY);
+
+                // Draw thinner white line on the small internal graphics buffer (scaled down)
+                graphicsBuffer.stroke(255); // White ink on black background
+                graphicsBuffer.strokeWeight(2); // Suitable thickness for 28x28
+                graphicsBuffer.line(
+                    pmouseX / DRAW_SCALE, pmouseY / DRAW_SCALE,
+                    mouseX / DRAW_SCALE, mouseY / DRAW_SCALE
+                );
+            }
+
+            // --- Visualization Update ---
+            // The NN visualization is mostly static structure, updated only on prediction
+            // We could add idle animations here if desired.
+        }
+
+        function mouseReleased() {
+            if (isDrawing && mouseIsOverCanvas(inputCanvas)) {
+                isDrawing = false;
+                if (model) { // Only predict if model is loaded
+                   predictDigit();
+                } else {
+                    console.warn("Model not loaded yet.");
+                }
+            }
+        }
+
+        // Helper to check if mouse is over a specific canvas
+        function mouseIsOverCanvas(canvasInstance) {
+            const canvasX = canvasInstance.elt.offsetLeft;
+            const canvasY = canvasInstance.elt.offsetTop;
+            return mouseX > canvasX && mouseX < canvasX + canvasInstance.width &&
+                   mouseY > canvasY && mouseY < canvasY + canvasInstance.height;
+        }
+
+        function clearDrawing() {
+            background(255); // Clear main input canvas (white background)
+            graphicsBuffer.background(0); // Clear buffer (black background for MNIST)
+            prediction = "?";
+            confidences = [];
+            select('#prediction-output').html(prediction);
+            updateConfidenceBars(confidences);
+            resetNetworkVisualization();
+            drawNeuralNetworkVisualization(); // Redraw static structure
+            isDrawing = false; // Reset drawing state
+        }
+
+        // --- TensorFlow.js Model Handling ---
+
+        async function loadTFModel() {
+            const statusDiv = select('#status');
+            try {
+                console.log("Loading model...");
+                statusDiv.html('Loading Model... Please Wait.');
+                // Load a publicly hosted MNIST CNN model (TF.js Layers format)
+                 // This model expects input shape [null, 28, 28, 1] and values between 0-1.
+                model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mnist_cnn_v1/model.json');
+
+                // model = await tf.loadLayersModel('localfolder/model.json'); // Use this if hosting locally with a server
+
+                console.log("Model loaded successfully.");
+                statusDiv.html('Model Loaded. Ready to draw!');
+                select('#clear-button').removeAttribute('disabled'); // Enable button
+                 initializeNetworkVisualization(model); // Re-init with actual model info if needed
+                 drawNeuralNetworkVisualization(); // Redraw NN
+
+            } catch (error) {
+                console.error("Error loading model:", error);
+                statusDiv.html('Error loading model. Check console.');
+            }
+        }
+
+        async function predictDigit() {
+            if (!model) {
+                console.log("Model not available.");
+                return;
+            }
+
+            const statusDiv = select('#status');
+            statusDiv.html('Predicting...');
+            select('#prediction-output').html('...'); // Indicate processing
+
+            await tf.tidy(() => { // Use tf.tidy to automatically manage tensor memory
+
+                // 1. Get image data from the small graphics buffer
+                let img = graphicsBuffer.get(); // Get p5 image object
+
+                // 2. Convert to TensorFlow tensor
+                // fromPixels takes HTML Image/Canvas element or ImageData
+                // We need to get the canvas element from the graphics buffer
+                 let tensor = tf.browser.fromPixels(graphicsBuffer.elt, 1) // 1 channel (grayscale)
+                    .resizeBilinear([INPUT_SIZE, INPUT_SIZE]) // Ensure correct size
+                    .toFloat() // Convert to float
+                    .div(tf.scalar(255)) // Normalize 0-255 -> 0-1
+                    .expandDims(0); // Add batch dimension: [1, 28, 28, 1]
+
+                // console.log("Input Tensor Shape:", tensor.shape); // Should be [1, 28, 28, 1]
+
+                // 3. Make prediction
+                let outputTensor = model.predict(tensor);
+
+                // 4. Process output tensor
+                confidences = outputTensor.dataSync(); // Use dataSync for simplicity here
+                let maxConfidence = 0;
+                let predictedDigit = 0;
+
+                confidences.forEach((confidence, digit) => {
+                    if (confidence > maxConfidence) {
+                        maxConfidence = confidence;
+                        predictedDigit = digit;
+                    }
+                });
+
+                prediction = `${predictedDigit}`;
+
+                // 5. Update UI
+                select('#prediction-output').html(prediction);
+                updateConfidenceBars(confidences, predictedDigit);
+                updateNetworkVisualization(confidences, predictedDigit); // Update NN viz based on prediction
+                drawNeuralNetworkVisualization(); // Redraw the NN with highlights
+
+            }); // End of tf.tidy block
+
+             statusDiv.html('Prediction Complete.');
+        }
+
+
+        // --- Visualization Functions ---
+
+        function initializeNetworkVisualization(loadedModel = null) {
+            // Basic static representation
+            // Could potentially inspect loadedModel.layers here for more accuracy
+            nnVizData = {
+                layers: [
+                    { count: 10, label: 'Input (28x28)', type: 'input' }, // Simplified input representation
+                    { count: 8, label: 'Conv/Pool 1', type: 'hidden' },
+                    { count: 16, label: 'Conv/Pool 2', type: 'hidden' },
+                    { count: 32, label: 'Dense', type: 'hidden' },
+                    { count: 10, label: 'Output', type: 'output' } // Output layer (digits 0-9)
+                ],
+                activations: [], // Will store output layer activations
+                predictedDigit: null
+            };
+            nnVizData.activations = Array(nnVizData.layers[nnVizData.layers.length - 1].count).fill(0);
+        }
+
+        function resetNetworkVisualization() {
+             nnVizData.activations.fill(0);
+             nnVizData.predictedDigit = null;
+        }
+
+        function updateNetworkVisualization(outputConfidences, predictedDigit) {
+            // Update activations for the output layer based on prediction
+            nnVizData.activations = Array.from(outputConfidences); // Convert TypedArray to regular array
+            nnVizData.predictedDigit = predictedDigit;
+        }
+
+        function drawNeuralNetworkVisualization() {
+            const nn = nnCanvas; // Use the graphics buffer
+            nn.background(250); // Light background for the viz canvas
+            nn.textAlign(nn.CENTER, nn.CENTER);
+            nn.textSize(10);
+
+            const layerSpacing = nn.width / (nnVizData.layers.length + 1);
+            const maxNodesToShow = 12; // Limit nodes per layer for clarity
+
+            for (let i = 0; i < nnVizData.layers.length; i++) {
+                const layer = nnVizData.layers[i];
+                const x = layerSpacing * (i + 1);
+
+                // Draw Layer Label
+                nn.fill(100);
+                nn.noStroke();
+                nn.text(layer.label, x, 15);
+
+                const nodeCount = Math.min(layer.count, maxNodesToShow);
+                const nodeSpacing = (nn.height - 60) / Math.max(1, nodeCount -1); // Vertical spacing
+                 const startY = nodeCount === 1 ? nn.height / 2 : 40;
+
+                 // Draw connections (simplified)
+                if (i > 0) {
+                    const prevLayer = nnVizData.layers[i-1];
+                    const prevX = layerSpacing * i;
+                    const prevNodeCount = Math.min(prevLayer.count, maxNodesToShow);
+                     const prevStartY = prevNodeCount === 1 ? nn.height / 2 : 40;
+                     const prevNodeSpacing = (nn.height - 60) / Math.max(1, prevNodeCount -1);
+
+                    nn.stroke(200, 200, 200, 100); // Light grey connections
+                    nn.strokeWeight(0.5);
+                     for (let j = 0; j < nodeCount; j++) {
+                         const y = nodeCount === 1 ? startY : startY + j * nodeSpacing;
+                         for (let k = 0; k < prevNodeCount; k++) {
+                             const prevY = prevNodeCount === 1 ? prevStartY : prevStartY + k * prevNodeSpacing;
+                             nn.line(prevX, prevY, x, y);
+                         }
+                     }
+                }
+
+
+                // Draw Nodes
+                for (let j = 0; j < nodeCount; j++) {
+                    const y = nodeCount === 1 ? startY : startY + j * nodeSpacing;
+                    let nodeSize = (layer.type === 'output' || layer.type === 'input') ? 10 : 7;
+                    let nodeColor = color(200); // Default grey
+                    let nodeStroke = 180;
+                    let nodeStrokeWeight = 1;
+
+                    if (layer.type === 'output') {
+                        const activation = nnVizData.activations[j] || 0;
+                        // Color based on activation strength (blue intensity)
+                        nodeColor = lerpColor(color(230), color(52, 152, 219, 255), activation);
+                        nodeSize = 8 + activation * 8; // Size based on activation
+
+                        if (j === nnVizData.predictedDigit) {
+                            nodeColor = color(46, 204, 113); // Highlight predicted green
+                            nodeStroke = color(39, 174, 96);
+                            nodeStrokeWeight = 2;
+                            nodeSize = 18; // Make predicted larger
+                        }
+
+                         // Draw digit label next to output node
+                         nn.fill(50);
+                         nn.noStroke();
+                         nn.textSize(9);
+                         nn.textAlign(nn.LEFT, nn.CENTER);
+                         nn.text(j, x + nodeSize / 2 + 5, y);
+                         nn.textAlign(nn.CENTER, nn.CENTER); // Reset alignment
+                    } else if (layer.type === 'input') {
+                         nodeColor = color(210);
+                    }
+
+
+                    nn.fill(nodeColor);
+                    nn.stroke(nodeStroke);
+                    nn.strokeWeight(nodeStrokeWeight);
+                    nn.ellipse(x, y, nodeSize, nodeSize);
+                }
+                 if (layer.count > maxNodesToShow) {
+                     nn.fill(150);
+                     nn.noStroke();
+                     nn.text("...", x, nn.height - 15);
+                 }
+            }
+             // Draw the visualization from the graphics buffer onto the main canvas
+            image(nnCanvas, 0, 0); // This line might be causing issues if called inside draw() when nnCanvas is the main canvas.
+                                     // Since nnCanvas is a separate graphics object, we need to explicitly draw it
+                                     // onto the *actual* p5 canvas IF we weren't attaching it via .parent().
+                                     // But since we used .parent(), p5 handles displaying it. We just draw *to* nnCanvas.
+                                     // The 'image(nnCanvas, 0, 0)' line is only needed if nnCanvas was NOT attached
+                                     // to the DOM and you wanted to draw its contents onto the *main* p5 canvas.
+                                     // We can safely remove it here as nnCanvas is parented.
+        }
+
+
+        function updateConfidenceBars(confidences, predictedDigit = -1) {
+            let barsContainer = select('#confidence-bars');
+            barsContainer.html(''); // Clear previous bars
+
+            if (!confidences || confidences.length === 0) {
+                 // Optionally show placeholder text
+                 barsContainer.html('<p style="font-size: 0.9em; color: #888;">Draw a digit to see confidences.</p>');
+                return;
+            }
+
+            for (let i = 0; i < confidences.length; i++) {
+                let confidence = confidences[i];
+                let percentage = (confidence * 100);
+
+                // Create entry container
+                let entry = createDiv('');
+                entry.parent(barsContainer);
+                entry.addClass('confidence-entry');
+
+                // Create Label
+                let label = createSpan(`Digit ${i}:`);
+                label.parent(entry);
+                label.addClass('confidence-label');
+
+                // Create Bar Background
+                let barBg = createDiv('');
+                barBg.parent(entry);
+                barBg.addClass('confidence-bar-bg');
+
+                // Create Inner Bar
+                let bar = createDiv(percentage.toFixed(1) + '%'); // Show percentage inside bar
+                bar.parent(barBg);
+                bar.addClass('confidence-bar');
+                bar.style('width', `${percentage}%`); // Set width based on confidence
+
+                if (i === predictedDigit) {
+                    bar.addClass('highlight'); // Add highlight class if it's the prediction
+                }
+            }
+        }
+
+    </script>
+
+</body>
+</html>
